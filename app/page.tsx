@@ -1,12 +1,12 @@
 "use client";
 
 import AuthGate from "../src/AuthGate";
-import TexasGalGeneratorApp from "../src/TexasGalGeneratorApp";
+import MockupPage from "./mockup-generator/page";
 
 export default function Page() {
   return (
     <AuthGate>
-      <TexasGalGeneratorApp />
+      <MockupPage />
     </AuthGate>
   );
 }
