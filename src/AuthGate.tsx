@@ -55,7 +55,7 @@ export default function AuthGate({
       }
 
       const { data, error } = await supabase
-        .from("approved_users")
+        .from("approved_mockup_users")
         .select("email")
         .eq("email", user.email)
         .maybeSingle();
