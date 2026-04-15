@@ -5,9 +5,33 @@ import { supabase } from "./supabaseClient";
 
 type AuthGateProps = {
   children: React.ReactNode;
+  appName?: string;
+  subtitle?: string;
+  badgeText?: string;
+  primaryColor?: string;
+  primaryColorDisabled?: string;
+  titleColor?: string;
+  subtitleColor?: string;
+  backgroundGradient?: string;
+  cardBorderColor?: string;
+  inputBorderColor?: string;
+  headerBorderColor?: string;
 };
 
-export default function AuthGate({ children }: AuthGateProps) {
+export default function AuthGate({
+  children,
+  appName = "Texas Gal Alphabet Generator",
+  subtitle = "Enter your approved email to receive your secure login link.",
+  badgeText = "TG",
+  primaryColor = "#c98668",
+  primaryColorDisabled = "#d8b7a8",
+  titleColor = "#7d5a50",
+  subtitleColor = "#9a776b",
+  backgroundGradient = "linear-gradient(180deg, #fff8f4 0%, #fff2ea 100%)",
+  cardBorderColor = "#f0ddd2",
+  inputBorderColor = "#e8d4c7",
+  headerBorderColor = "#ead7cb",
+}: AuthGateProps) {
   const [loading, setLoading] = useState(true);
   const [userEmail, setUserEmail] = useState<string | null>(null);
   const [emailInput, setEmailInput] = useState("");
@@ -106,8 +130,8 @@ export default function AuthGate({ children }: AuthGateProps) {
           minHeight: "100vh",
           display: "grid",
           placeItems: "center",
-          background: "linear-gradient(180deg, #fff8f4 0%, #fff2ea 100%)",
-          color: "#7d5a50",
+          background: backgroundGradient,
+          color: titleColor,
           fontFamily: "sans-serif",
         }}
       >
@@ -123,7 +147,7 @@ export default function AuthGate({ children }: AuthGateProps) {
           minHeight: "100vh",
           display: "grid",
           placeItems: "center",
-          background: "linear-gradient(180deg, #fff8f4 0%, #fff2ea 100%)",
+          background: backgroundGradient,
           padding: 24,
           fontFamily: "sans-serif",
         }}
@@ -136,7 +160,7 @@ export default function AuthGate({ children }: AuthGateProps) {
             borderRadius: 24,
             padding: 32,
             boxShadow: "0 20px 50px rgba(0,0,0,0.08)",
-            border: "1px solid #f0ddd2",
+            border: `1px solid ${cardBorderColor}`,
           }}
         >
           <div
@@ -147,13 +171,13 @@ export default function AuthGate({ children }: AuthGateProps) {
               margin: "0 auto 20px",
               display: "grid",
               placeItems: "center",
-              background: "linear-gradient(135deg, #e8b9a2 0%, #d79678 100%)",
+              background: `linear-gradient(135deg, ${primaryColorDisabled} 0%, ${primaryColor} 100%)`,
               color: "#fff",
               fontSize: 28,
               fontWeight: 700,
             }}
           >
-            TG
+            {badgeText}
           </div>
 
           <h1
@@ -162,24 +186,22 @@ export default function AuthGate({ children }: AuthGateProps) {
               fontSize: 32,
               lineHeight: 1.15,
               margin: "0 0 10px",
-              color: "#7d5a50",
+              color: titleColor,
             }}
           >
-            Texas Gal
-            <br />
-            Alphabet Generator
+            {appName}
           </h1>
 
           <p
             style={{
               textAlign: "center",
-              color: "#9a776b",
+              color: subtitleColor,
               margin: "0 0 24px",
               fontSize: 15,
               lineHeight: 1.5,
             }}
           >
-            Enter your approved email to receive your secure login link.
+            {subtitle}
           </p>
 
           <input
@@ -191,7 +213,7 @@ export default function AuthGate({ children }: AuthGateProps) {
               width: "100%",
               padding: "14px 16px",
               borderRadius: 14,
-              border: "1px solid #e8d4c7",
+              border: `1px solid ${inputBorderColor}`,
               outline: "none",
               fontSize: 16,
               marginBottom: 14,
@@ -207,7 +229,7 @@ export default function AuthGate({ children }: AuthGateProps) {
               padding: "14px 16px",
               borderRadius: 14,
               border: "none",
-              background: sending ? "#d8b7a8" : "#c98668",
+              background: sending ? primaryColorDisabled : primaryColor,
               color: "#fff",
               fontSize: 16,
               fontWeight: 700,
@@ -222,7 +244,7 @@ export default function AuthGate({ children }: AuthGateProps) {
               style={{
                 marginTop: 14,
                 textAlign: "center",
-                color: "#8b685d",
+                color: subtitleColor,
                 fontSize: 14,
                 lineHeight: 1.5,
               }}
@@ -248,18 +270,16 @@ export default function AuthGate({ children }: AuthGateProps) {
           gap: 16,
           padding: "12px 18px",
           background: "rgba(255,255,255,0.92)",
-          borderBottom: "1px solid #ead7cb",
+          borderBottom: `1px solid ${headerBorderColor}`,
           backdropFilter: "blur(8px)",
         }}
       >
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontWeight: 700, color: "#7d5a50" }}>
-            Texas Gal Alphabet Generator
-          </div>
+          <div style={{ fontWeight: 700, color: titleColor }}>{appName}</div>
           <div
             style={{
               fontSize: 12,
-              color: "#9a776b",
+              color: subtitleColor,
               whiteSpace: "nowrap",
               overflow: "hidden",
               textOverflow: "ellipsis",
@@ -276,7 +296,7 @@ export default function AuthGate({ children }: AuthGateProps) {
             padding: "10px 14px",
             borderRadius: 12,
             border: "none",
-            background: "#c98668",
+            background: primaryColor,
             color: "#fff",
             fontWeight: 700,
             cursor: "pointer",
