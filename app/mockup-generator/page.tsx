@@ -3,7 +3,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-// Texas Gal Mockup Generator — V6.6
+// Texas Gal Mockup Generator — V6.9
 // Layout + overlap upgrade:
 // - Templates removed
 // - Keeps auto-fit text to canvas
@@ -60,6 +60,95 @@ function readImageFile(file) {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
+
+async function buildImageFromSource(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      img._src = src;
+      resolve(img);
+    };
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+async function trimTransparentImage(img, src, options = {}) {
+  const alphaThreshold = options.alphaThreshold ?? 1;
+  const minTrimPixels = options.minTrimPixels ?? 2;
+
+  const canvas = document.createElement("canvas");
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  if (!ctx) return { img, src, trimmed: false, trimBounds: null };
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0);
+
+  const { data, width, height } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const alpha = data[(y * width + x) * 4 + 3];
+      if (alpha > alphaThreshold) {
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+
+  if (maxX < minX || maxY < minY) {
+    return { img, src, trimmed: false, trimBounds: null };
+  }
+
+  const cropX = Math.max(0, minX);
+  const cropY = Math.max(0, minY);
+  const cropW = Math.max(1, maxX - minX + 1);
+  const cropH = Math.max(1, maxY - minY + 1);
+
+  const leftPad = cropX;
+  const topPad = cropY;
+  const rightPad = width - (cropX + cropW);
+  const bottomPad = height - (cropY + cropH);
+  const shouldTrim =
+    leftPad >= minTrimPixels ||
+    topPad >= minTrimPixels ||
+    rightPad >= minTrimPixels ||
+    bottomPad >= minTrimPixels;
+
+  if (!shouldTrim) {
+    return {
+      img,
+      src,
+      trimmed: false,
+      trimBounds: { x: cropX, y: cropY, width: cropW, height: cropH },
+    };
+  }
+
+  const croppedCanvas = document.createElement("canvas");
+  croppedCanvas.width = cropW;
+  croppedCanvas.height = cropH;
+  const croppedCtx = croppedCanvas.getContext("2d");
+  if (!croppedCtx) return { img, src, trimmed: false, trimBounds: null };
+
+  croppedCtx.drawImage(canvas, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+  const trimmedSrc = croppedCanvas.toDataURL("image/png");
+  const trimmedImg = await buildImageFromSource(trimmedSrc);
+
+  return {
+    img: trimmedImg,
+    src: trimmedSrc,
+    trimmed: true,
+    trimBounds: { x: cropX, y: cropY, width: cropW, height: cropH },
+  };
 }
 function fitRectCover(imgW, imgH, boxW, boxH) {
   const scale = Math.max(boxW / imgW, boxH / imgH);
@@ -196,6 +285,7 @@ function buildWordItems({
   overlapSeed,
   canvasW,
   canvasH,
+  textAlign = "center",
 }) {
   const lines = getLinesFromPhrase(phrase).slice(0, 3);
   if (!lines.length) return [];
@@ -208,19 +298,16 @@ function buildWordItems({
   const items = [];
   const lineCount = lines.length;
   const sidePadding = canvasW * 0.05;
-  const maxLineWidth = canvasW - sidePadding * 2;
+  const topPadding = canvasH * 0.06;
   const bottomPadding = canvasH * 0.08;
+  const maxLineWidth = canvasW - sidePadding * 2;
   const availableHeight = Math.max(
-    canvasH * 0.18,
-    canvasH - topOffset - bottomPadding - Math.max(0, lineCount - 1) * lineSpacing
+    canvasH * 0.24,
+    canvasH - topPadding - bottomPadding - Math.max(0, lineCount - 1) * lineSpacing
   );
-  const maxLetterHeightByLines = availableHeight / lineCount;
-  const safeBaseLetterH = Math.min(canvasH * 0.24, maxLetterHeightByLines * 0.72);
-  const baseLetterH = Math.max(
-    canvasH * 0.08,
-    Math.min(safeBaseLetterH * (designScale / 100), maxLetterHeightByLines)
-  );
-  const startY = topOffset;
+  const maxLetterHeightByLines = Math.max(canvasH * 0.08, availableHeight / lineCount);
+  const preferredBaseLetterH = Math.min(canvasH * 0.24, maxLetterHeightByLines * 0.72);
+  const baseLetterH = Math.max(canvasH * 0.08, preferredBaseLetterH * (designScale / 100));
   const isOverlapMode = layoutMode === "overlap";
   let globalIndex = 0;
 
@@ -256,7 +343,11 @@ function buildWordItems({
       let yJitter = 0;
 
       if (isOverlapMode) {
-        const sizeDelta = rangeFromSeed(seedBase + 11, -overlapSizeVariation, overlapSizeVariation);
+        const sizeDelta = rangeFromSeed(
+          seedBase + 11,
+          -overlapSizeVariation,
+          overlapSizeVariation
+        );
         sizeFactor = Math.max(0.5, 1 + sizeDelta / 100);
         rotation = rangeFromSeed(
           seedBase + 29,
@@ -283,7 +374,7 @@ function buildWordItems({
         image: img,
         src: img._src || img.src || null,
         x: xCursor,
-        y: startY + lineIndex * lineSpacing + yJitter,
+        y: lineIndex * lineSpacing + yJitter,
         width: w,
         height: h,
         baseWidth: w,
@@ -331,16 +422,6 @@ function buildWordItems({
       return next;
     });
 
-    const fittedTotalW =
-      provisional[provisional.length - 1].x +
-      provisional[provisional.length - 1].width;
-
-    const offsetX = (canvasW - fittedTotalW) / 2;
-
-    provisional.forEach((item) => {
-      item.x += offsetX;
-    });
-
     const shouldArc =
       layoutMode === "arc" && Array.isArray(lineArcEnabled) && lineArcEnabled[lineIndex];
     const currentArcHeight = Array.isArray(lineArcHeights)
@@ -363,6 +444,89 @@ function buildWordItems({
     }
 
     items.push(...provisional);
+  });
+
+  if (!items.length) return [];
+
+  const getBounds = (arr) => {
+    const minX = Math.min(...arr.map((item) => item.x));
+    const minY = Math.min(...arr.map((item) => item.y));
+    const maxX = Math.max(...arr.map((item) => item.x + item.width));
+    const maxY = Math.max(...arr.map((item) => item.y + item.height));
+    return {
+      minX,
+      minY,
+      maxX,
+      maxY,
+      width: maxX - minX,
+      height: maxY - minY,
+    };
+  };
+
+  let bounds = getBounds(items);
+
+  if (autoFit) {
+    const maxDesignHeight = Math.max(canvasH * 0.24, canvasH - topPadding - bottomPadding);
+    const fitScale = Math.min(
+      1,
+      maxLineWidth / Math.max(bounds.width, 1),
+      maxDesignHeight / Math.max(bounds.height, 1)
+    );
+
+    if (fitScale < 1) {
+      items.forEach((item) => {
+        item.x *= fitScale;
+        item.y *= fitScale;
+        item.width *= fitScale;
+        item.height *= fitScale;
+        item.baseWidth *= fitScale;
+        item.baseHeight *= fitScale;
+        item.baseLetterH *= fitScale;
+      });
+      bounds = getBounds(items);
+    }
+  }
+
+  const lineIndexes = [...new Set(items.map((item) => item.lineIndex ?? 0))];
+  const lineBoundsMap = new Map();
+  let maxAlignedWidth = 0;
+
+  lineIndexes.forEach((lineIndex) => {
+    const lineItems = items.filter((item) => (item.lineIndex ?? 0) === lineIndex);
+    if (!lineItems.length) return;
+    const lineBounds = getBounds(lineItems);
+    lineBoundsMap.set(lineIndex, lineBounds);
+    maxAlignedWidth = Math.max(maxAlignedWidth, lineBounds.width);
+  });
+
+  const alignmentBoxLeft = (canvasW - maxAlignedWidth) / 2;
+
+  lineIndexes.forEach((lineIndex) => {
+    const lineBounds = lineBoundsMap.get(lineIndex);
+    if (!lineBounds) return;
+
+    const targetLineLeft =
+      textAlign === "left"
+        ? alignmentBoxLeft
+        : alignmentBoxLeft + (maxAlignedWidth - lineBounds.width) / 2;
+
+    const shiftX = targetLineLeft - lineBounds.minX;
+
+    items.forEach((item) => {
+      if ((item.lineIndex ?? 0) === lineIndex) {
+        item.x += shiftX;
+      }
+    });
+  });
+
+  bounds = getBounds(items);
+  const minTop = topPadding;
+  const maxTop = Math.max(minTop, canvasH - bottomPadding - bounds.height);
+  const desiredTop = Math.max(minTop, Math.min(topOffset, maxTop));
+  const offsetY = desiredTop - bounds.minY;
+
+  items.forEach((item) => {
+    item.y += offsetY;
   });
 
   return items;
@@ -537,6 +701,27 @@ async function downloadCanvasAsPng(canvas, filename, dpi = 300) {
   URL.revokeObjectURL(url);
 }
 
+function getOrderedItems(source) {
+  return [...source].sort((a, b) => {
+    const az = a?.zIndex ?? 0;
+    const bz = b?.zIndex ?? 0;
+    if (az !== bz) return az - bz;
+    return 0;
+  });
+}
+
+function normalizeLayerOrder(source) {
+  return getOrderedItems(source).map((item, index) => ({
+    ...item,
+    zIndex: index,
+  }));
+}
+
+function getNextLayerZ(source) {
+  if (!source.length) return 0;
+  return Math.max(...source.map((item) => item?.zIndex ?? -1)) + 1;
+}
+
 export default function AlphabetMockupWordDesigner() {
   const previewCanvasRef = useRef(null);
   const stageWrapRef = useRef(null);
@@ -544,6 +729,8 @@ export default function AlphabetMockupWordDesigner() {
   const bgFileInputRef = useRef(null);
   const elementUploadRef = useRef(null);
   const logoUploadRef = useRef(null);
+  const watermarkImageUploadRef = useRef(null);
+  const hitCanvasCacheRef = useRef(new Map());
 
   const [canvasPresetId, setCanvasPresetId] = useState("etsy");
   const canvasPreset = useMemo(
@@ -558,6 +745,7 @@ export default function AlphabetMockupWordDesigner() {
   const [phrase, setPhrase] = useState("ABCDE");
   const [topOffset, setTopOffset] = useState(Math.round(canvasH * 0.24));
   const [layoutMode, setLayoutMode] = useState("hero");
+  const [textAlign, setTextAlign] = useState("center");
   const [alphabetPreviewMode, setAlphabetPreviewMode] = useState(false);
   const [autoAlternate, setAutoAlternate] = useState(true);
   const [alphabetScale, setAlphabetScale] = useState(100);
@@ -632,6 +820,8 @@ export default function AlphabetMockupWordDesigner() {
   );
 
   const [elementsLibrary, setElementsLibrary] = useState([]);
+  const [autoTrimAlphaUploads, setAutoTrimAlphaUploads] = useState(true);
+  const [autoTrimElementUploads, setAutoTrimElementUploads] = useState(true);
   const [logoAsset, setLogoAsset] = useState(null);
   const [watermarkEnabled, setWatermarkEnabled] = useState(false);
   const [watermarkText, setWatermarkText] = useState(
@@ -639,8 +829,16 @@ export default function AlphabetMockupWordDesigner() {
   );
   const [watermarkColor, setWatermarkColor] = useState("#c78fa2");
   const [watermarkOpacity, setWatermarkOpacity] = useState(18);
+  const [watermarkImageAsset, setWatermarkImageAsset] = useState(null);
 
   const [zoom, setZoom] = useState(0.28);
+  const [undoStack, setUndoStack] = useState([]);
+  const [redoStack, setRedoStack] = useState([]);
+  const historyInitializedRef = useRef(false);
+  const historyTimerRef = useRef(null);
+  const isApplyingHistoryRef = useRef(false);
+  const lastSnapshotRef = useRef(null);
+  const lastHistorySignatureRef = useRef("");
   const [exportName, setExportName] = useState("");
   const [exportDpi] = useState(300);
 
@@ -660,10 +858,434 @@ export default function AlphabetMockupWordDesigner() {
     export: true,
   });
 
+  function cloneAlphaSets(source) {
+    return source.map((set) =>
+      set
+        ? {
+            ...set,
+            letters: set.letters ? { ...set.letters } : {},
+          }
+        : null
+    );
+  }
+
+  function cloneItems(source) {
+    return source.map((item) => ({ ...item }));
+  }
+
+  function captureSnapshot() {
+    return {
+      canvasPresetId,
+      alphaSets: cloneAlphaSets(alphaSets),
+      phrase,
+      topOffset,
+      layoutMode,
+      textAlign,
+      alphabetPreviewMode,
+      autoAlternate,
+      alphabetScale,
+      designScale,
+      autoFit,
+      letterSpacing,
+      lineSpacing,
+      arcHeight,
+      lineArcEnabled: [...lineArcEnabled],
+      lineArcHeights: [...lineArcHeights],
+      overlapAmount,
+      overlapSizeVariation,
+      overlapRotationVariation,
+      overlapSeed,
+      items: cloneItems(items),
+      selectedId,
+      transparentBg,
+      bgColor,
+      bgImage,
+      bgFit,
+      bgOpacity,
+      bannerEnabled,
+      bannerPosition,
+      bannerColor,
+      bannerOpacity,
+      bannerText,
+      bannerTextColor,
+      bannerHeight,
+      bannerWidthPct,
+      bannerMargin,
+      bannerRadius,
+      bannerFontSize,
+      banner2Enabled,
+      banner2Position,
+      banner2Color,
+      banner2Opacity,
+      banner2Text,
+      banner2TextColor,
+      banner2Height,
+      banner2WidthPct,
+      banner2Margin,
+      banner2Radius,
+      banner2FontSize,
+      banner3Enabled,
+      banner3Position,
+      banner3Color,
+      banner3Opacity,
+      banner3Text,
+      banner3TextColor,
+      banner3Height,
+      banner3WidthPct,
+      banner3Margin,
+      banner3Radius,
+      banner3FontSize,
+      autoTrimAlphaUploads,
+      autoTrimElementUploads,
+      elementsLibrary: cloneItems(elementsLibrary),
+      logoAsset: logoAsset ? { ...logoAsset } : null,
+      watermarkEnabled,
+      watermarkText,
+      watermarkColor,
+      watermarkOpacity,
+      watermarkImageAsset: watermarkImageAsset ? { ...watermarkImageAsset } : null,
+      zoom,
+      exportName,
+      openSections: { ...openSections },
+    };
+  }
+
+  function makeSnapshotSignature(snapshot) {
+    return JSON.stringify({
+      canvasPresetId: snapshot.canvasPresetId,
+      alphaSets: snapshot.alphaSets.map((set) =>
+        set
+          ? {
+              id: set.id,
+              name: set.name,
+              count: set.count,
+              keys: Object.keys(set.letters || {}).sort(),
+            }
+          : null
+      ),
+      phrase: snapshot.phrase,
+      topOffset: snapshot.topOffset,
+      layoutMode: snapshot.layoutMode,
+      alphabetPreviewMode: snapshot.alphabetPreviewMode,
+      autoAlternate: snapshot.autoAlternate,
+      alphabetScale: snapshot.alphabetScale,
+      designScale: snapshot.designScale,
+      autoFit: snapshot.autoFit,
+      letterSpacing: snapshot.letterSpacing,
+      lineSpacing: snapshot.lineSpacing,
+      arcHeight: snapshot.arcHeight,
+      lineArcEnabled: snapshot.lineArcEnabled,
+      lineArcHeights: snapshot.lineArcHeights,
+      overlapAmount: snapshot.overlapAmount,
+      overlapSizeVariation: snapshot.overlapSizeVariation,
+      overlapRotationVariation: snapshot.overlapRotationVariation,
+      overlapSeed: snapshot.overlapSeed,
+      items: snapshot.items.map((item) => ({
+        id: item.id,
+        type: item.type,
+        name: item.name,
+        char: item.char,
+        text: item.text,
+        src: item.src || item.image?._src || item.image?.src || null,
+        x: item.x,
+        y: item.y,
+        width: item.width,
+        height: item.height,
+        baseWidth: item.baseWidth,
+        baseHeight: item.baseHeight,
+        widthScale: item.widthScale,
+        heightScale: item.heightScale,
+        rotation: item.rotation,
+        opacity: item.opacity,
+        zIndex: item.zIndex,
+        fontSize: item.fontSize,
+        color: item.color,
+      })),
+      selectedId: snapshot.selectedId,
+      transparentBg: snapshot.transparentBg,
+      bgColor: snapshot.bgColor,
+      bgImageSrc: snapshot.bgImage?._src || snapshot.bgImage?.src || null,
+      bgFit: snapshot.bgFit,
+      bgOpacity: snapshot.bgOpacity,
+      bannerEnabled: snapshot.bannerEnabled,
+      bannerPosition: snapshot.bannerPosition,
+      bannerColor: snapshot.bannerColor,
+      bannerOpacity: snapshot.bannerOpacity,
+      bannerText: snapshot.bannerText,
+      bannerTextColor: snapshot.bannerTextColor,
+      bannerHeight: snapshot.bannerHeight,
+      bannerWidthPct: snapshot.bannerWidthPct,
+      bannerMargin: snapshot.bannerMargin,
+      bannerRadius: snapshot.bannerRadius,
+      bannerFontSize: snapshot.bannerFontSize,
+      banner2Enabled: snapshot.banner2Enabled,
+      banner2Position: snapshot.banner2Position,
+      banner2Color: snapshot.banner2Color,
+      banner2Opacity: snapshot.banner2Opacity,
+      banner2Text: snapshot.banner2Text,
+      banner2TextColor: snapshot.banner2TextColor,
+      banner2Height: snapshot.banner2Height,
+      banner2WidthPct: snapshot.banner2WidthPct,
+      banner2Margin: snapshot.banner2Margin,
+      banner2Radius: snapshot.banner2Radius,
+      banner2FontSize: snapshot.banner2FontSize,
+      banner3Enabled: snapshot.banner3Enabled,
+      banner3Position: snapshot.banner3Position,
+      banner3Color: snapshot.banner3Color,
+      banner3Opacity: snapshot.banner3Opacity,
+      banner3Text: snapshot.banner3Text,
+      banner3TextColor: snapshot.banner3TextColor,
+      banner3Height: snapshot.banner3Height,
+      banner3WidthPct: snapshot.banner3WidthPct,
+      banner3Margin: snapshot.banner3Margin,
+      banner3Radius: snapshot.banner3Radius,
+      banner3FontSize: snapshot.banner3FontSize,
+      autoTrimAlphaUploads: snapshot.autoTrimAlphaUploads,
+      autoTrimElementUploads: snapshot.autoTrimElementUploads,
+      elementsLibrary: snapshot.elementsLibrary.map((item) => ({
+        id: item.id,
+        name: item.name,
+        src: item.src || item.image?._src || item.image?.src || null,
+      })),
+      logoAsset: snapshot.logoAsset
+        ? { id: snapshot.logoAsset.id, name: snapshot.logoAsset.name, src: snapshot.logoAsset.src }
+        : null,
+      watermarkEnabled: snapshot.watermarkEnabled,
+      watermarkText: snapshot.watermarkText,
+      watermarkColor: snapshot.watermarkColor,
+      watermarkOpacity: snapshot.watermarkOpacity,
+      watermarkImageAsset: snapshot.watermarkImageAsset
+        ? {
+            id: snapshot.watermarkImageAsset.id,
+            name: snapshot.watermarkImageAsset.name,
+            src: snapshot.watermarkImageAsset.src,
+          }
+        : null,
+      zoom: snapshot.zoom,
+      exportName: snapshot.exportName,
+      openSections: snapshot.openSections,
+    });
+  }
+
+  function applySnapshot(snapshot) {
+    if (!snapshot) return;
+    isApplyingHistoryRef.current = true;
+
+    setCanvasPresetId(snapshot.canvasPresetId);
+    setAlphaSets(cloneAlphaSets(snapshot.alphaSets));
+    setPhrase(snapshot.phrase);
+    setTopOffset(snapshot.topOffset);
+    setLayoutMode(snapshot.layoutMode);
+    setTextAlign(snapshot.textAlign ?? "center");
+    setAlphabetPreviewMode(snapshot.alphabetPreviewMode);
+    setAutoAlternate(snapshot.autoAlternate);
+    setAlphabetScale(snapshot.alphabetScale);
+    setDesignScale(snapshot.designScale);
+    setAutoFit(snapshot.autoFit);
+    setLetterSpacing(snapshot.letterSpacing);
+    setLineSpacing(snapshot.lineSpacing);
+    setArcHeight(snapshot.arcHeight);
+    setLineArcEnabled([...snapshot.lineArcEnabled]);
+    setLineArcHeights([...snapshot.lineArcHeights]);
+    setOverlapAmount(snapshot.overlapAmount);
+    setOverlapSizeVariation(snapshot.overlapSizeVariation);
+    setOverlapRotationVariation(snapshot.overlapRotationVariation);
+    setOverlapSeed(snapshot.overlapSeed);
+    setItems(cloneItems(snapshot.items));
+    setSelectedId(snapshot.selectedId);
+    setTransparentBg(snapshot.transparentBg);
+    setBgColor(snapshot.bgColor);
+    setBgImage(snapshot.bgImage || null);
+    setBgFit(snapshot.bgFit);
+    setBgOpacity(snapshot.bgOpacity);
+    setBannerEnabled(snapshot.bannerEnabled);
+    setBannerPosition(snapshot.bannerPosition);
+    setBannerColor(snapshot.bannerColor);
+    setBannerOpacity(snapshot.bannerOpacity);
+    setBannerText(snapshot.bannerText);
+    setBannerTextColor(snapshot.bannerTextColor);
+    setBannerHeight(snapshot.bannerHeight);
+    setBannerWidthPct(snapshot.bannerWidthPct);
+    setBannerMargin(snapshot.bannerMargin);
+    setBannerRadius(snapshot.bannerRadius);
+    setBannerFontSize(snapshot.bannerFontSize);
+    setBanner2Enabled(snapshot.banner2Enabled);
+    setBanner2Position(snapshot.banner2Position);
+    setBanner2Color(snapshot.banner2Color);
+    setBanner2Opacity(snapshot.banner2Opacity);
+    setBanner2Text(snapshot.banner2Text);
+    setBanner2TextColor(snapshot.banner2TextColor);
+    setBanner2Height(snapshot.banner2Height);
+    setBanner2WidthPct(snapshot.banner2WidthPct);
+    setBanner2Margin(snapshot.banner2Margin);
+    setBanner2Radius(snapshot.banner2Radius);
+    setBanner2FontSize(snapshot.banner2FontSize);
+    setBanner3Enabled(snapshot.banner3Enabled);
+    setBanner3Position(snapshot.banner3Position);
+    setBanner3Color(snapshot.banner3Color);
+    setBanner3Opacity(snapshot.banner3Opacity);
+    setBanner3Text(snapshot.banner3Text);
+    setBanner3TextColor(snapshot.banner3TextColor);
+    setBanner3Height(snapshot.banner3Height);
+    setBanner3WidthPct(snapshot.banner3WidthPct);
+    setBanner3Margin(snapshot.banner3Margin);
+    setBanner3Radius(snapshot.banner3Radius);
+    setBanner3FontSize(snapshot.banner3FontSize);
+    setAutoTrimAlphaUploads(snapshot.autoTrimAlphaUploads ?? true);
+    setAutoTrimElementUploads(snapshot.autoTrimElementUploads ?? true);
+    setElementsLibrary(cloneItems(snapshot.elementsLibrary));
+    setLogoAsset(snapshot.logoAsset ? { ...snapshot.logoAsset } : null);
+    setWatermarkEnabled(snapshot.watermarkEnabled);
+    setWatermarkText(snapshot.watermarkText);
+    setWatermarkColor(snapshot.watermarkColor);
+    setWatermarkOpacity(snapshot.watermarkOpacity);
+    setWatermarkImageAsset(snapshot.watermarkImageAsset ? { ...snapshot.watermarkImageAsset } : null);
+    setZoom(snapshot.zoom);
+    setExportName(snapshot.exportName);
+    setOpenSections({ ...snapshot.openSections });
+
+    lastSnapshotRef.current = snapshot;
+    lastHistorySignatureRef.current = makeSnapshotSignature(snapshot);
+
+    window.setTimeout(() => {
+      isApplyingHistoryRef.current = false;
+    }, 0);
+  }
+
+  function undoAction() {
+    if (!undoStack.length) return;
+    const previous = undoStack[undoStack.length - 1];
+    const current = captureSnapshot();
+    setUndoStack((prev) => prev.slice(0, -1));
+    setRedoStack((prev) => [...prev, current]);
+    applySnapshot(previous);
+  }
+
+  function redoAction() {
+    if (!redoStack.length) return;
+    const next = redoStack[redoStack.length - 1];
+    const current = captureSnapshot();
+    setRedoStack((prev) => prev.slice(0, -1));
+    setUndoStack((prev) => [...prev, current]);
+    applySnapshot(next);
+  }
+
   const selectedItem = useMemo(
     () => items.find((i) => i.id === selectedId) || null,
     [items, selectedId]
   );
+
+  useEffect(() => {
+    if (historyTimerRef.current) {
+      clearTimeout(historyTimerRef.current);
+    }
+
+    const currentSnapshot = captureSnapshot();
+    const currentSignature = makeSnapshotSignature(currentSnapshot);
+
+    if (!historyInitializedRef.current) {
+      historyInitializedRef.current = true;
+      lastSnapshotRef.current = currentSnapshot;
+      lastHistorySignatureRef.current = currentSignature;
+      return;
+    }
+
+    if (isApplyingHistoryRef.current || draggingId) return;
+    if (currentSignature === lastHistorySignatureRef.current) return;
+
+    historyTimerRef.current = window.setTimeout(() => {
+      if (isApplyingHistoryRef.current || draggingId) return;
+      const stableSnapshot = captureSnapshot();
+      const stableSignature = makeSnapshotSignature(stableSnapshot);
+      if (stableSignature === lastHistorySignatureRef.current) return;
+
+      setUndoStack((prev) => {
+        const next = [...prev, lastSnapshotRef.current].filter(Boolean);
+        return next.length > 60 ? next.slice(next.length - 60) : next;
+      });
+      setRedoStack([]);
+      lastSnapshotRef.current = stableSnapshot;
+      lastHistorySignatureRef.current = stableSignature;
+    }, 180);
+
+    return () => {
+      if (historyTimerRef.current) clearTimeout(historyTimerRef.current);
+    };
+  }, [
+    canvasPresetId,
+    alphaSets,
+    phrase,
+    topOffset,
+    layoutMode,
+    textAlign,
+    alphabetPreviewMode,
+    autoAlternate,
+    alphabetScale,
+    designScale,
+    autoFit,
+    letterSpacing,
+    lineSpacing,
+    arcHeight,
+    lineArcEnabled,
+    lineArcHeights,
+    overlapAmount,
+    overlapSizeVariation,
+    overlapRotationVariation,
+    overlapSeed,
+    items,
+    selectedId,
+    transparentBg,
+    bgColor,
+    bgImage,
+    bgFit,
+    bgOpacity,
+    bannerEnabled,
+    bannerPosition,
+    bannerColor,
+    bannerOpacity,
+    bannerText,
+    bannerTextColor,
+    bannerHeight,
+    bannerWidthPct,
+    bannerMargin,
+    bannerRadius,
+    bannerFontSize,
+    banner2Enabled,
+    banner2Position,
+    banner2Color,
+    banner2Opacity,
+    banner2Text,
+    banner2TextColor,
+    banner2Height,
+    banner2WidthPct,
+    banner2Margin,
+    banner2Radius,
+    banner2FontSize,
+    banner3Enabled,
+    banner3Position,
+    banner3Color,
+    banner3Opacity,
+    banner3Text,
+    banner3TextColor,
+    banner3Height,
+    banner3WidthPct,
+    banner3Margin,
+    banner3Radius,
+    banner3FontSize,
+    autoTrimAlphaUploads,
+    autoTrimElementUploads,
+    elementsLibrary,
+    logoAsset,
+    watermarkEnabled,
+    watermarkText,
+    watermarkColor,
+    watermarkOpacity,
+    watermarkImageAsset,
+    zoom,
+    exportName,
+    openSections,
+    draggingId,
+  ]);
 
   useEffect(() => {
     const nextLineSpacing = Math.round(canvasH * 0.22);
@@ -683,6 +1305,8 @@ export default function AlphabetMockupWordDesigner() {
   }, [canvasW, canvasH]);
 
   useEffect(() => {
+    if (isApplyingHistoryRef.current) return;
+
     const decorative = items.filter((item) => item.type !== "letter");
 
     const nextLetters =
@@ -713,10 +1337,11 @@ export default function AlphabetMockupWordDesigner() {
             overlapSeed,
             canvasW,
             canvasH,
+            textAlign,
           });
 
-    setItems([...nextLetters, ...decorative]);
-    setSelectedId(null);
+    setItems(normalizeLayerOrder([...nextLetters, ...decorative]));
+    setSelectedId((current) => (decorative.some((item) => item.id === current) ? current : null));
   }, [
     phrase,
     alphaSets,
@@ -738,6 +1363,7 @@ export default function AlphabetMockupWordDesigner() {
     overlapSeed,
     canvasW,
     canvasH,
+    textAlign,
   ]);
 
 
@@ -806,6 +1432,7 @@ export default function AlphabetMockupWordDesigner() {
 
     const letters = {};
     const skipped = [];
+    let trimmedCount = 0;
 
     for (const file of usableFiles) {
       const key = parseLetterKey(file.name);
@@ -814,7 +1441,13 @@ export default function AlphabetMockupWordDesigner() {
         continue;
       }
       try {
-        const { img, src } = await readImageFile(file);
+        let { img, src } = await readImageFile(file);
+        if (autoTrimAlphaUploads) {
+          const trimmed = await trimTransparentImage(img, src);
+          img = trimmed.img;
+          src = trimmed.src;
+          if (trimmed.trimmed) trimmedCount += 1;
+        }
         img._src = src;
         letters[key] = img;
       } catch (err) {
@@ -836,6 +1469,7 @@ export default function AlphabetMockupWordDesigner() {
     if (foundCount > 0) {
       status = `${foundCount} valid letters found`;
       if (hasUppercase > 0) status += ` • Uppercase found: ${hasUppercase}`;
+      if (trimmedCount > 0) status += ` • Trimmed: ${trimmedCount}`;
       if (skipped.length > 0) status += ` • Skipped: ${skipped.length}`;
       status += ` • Loaded from ${sourceLabel}`;
     }
@@ -846,6 +1480,7 @@ export default function AlphabetMockupWordDesigner() {
       letters,
       count: foundCount,
       uppercaseCount: hasUppercase,
+      trimmedCount,
       status,
       sourceLabel,
       skippedCount: skipped.length,
@@ -890,13 +1525,21 @@ export default function AlphabetMockupWordDesigner() {
     const loaded = [];
     for (const file of files) {
       try {
-        const { img, src } = await readImageFile(file);
+        let { img, src } = await readImageFile(file);
+        let wasTrimmed = false;
+        if (autoTrimElementUploads) {
+          const trimmed = await trimTransparentImage(img, src);
+          img = trimmed.img;
+          src = trimmed.src;
+          wasTrimmed = !!trimmed.trimmed;
+        }
         img._src = src;
         loaded.push({
           id: uid(),
           name: file.name.replace(/\.[^/.]+$/, ""),
           image: img,
           src,
+          wasTrimmed,
         });
       } catch (err) {
         console.error(err);
@@ -931,7 +1574,7 @@ export default function AlphabetMockupWordDesigner() {
       opacity: 1,
     };
 
-    setItems((prev) => [...prev, newItem]);
+    setItems((prev) => [...prev, { ...newItem, zIndex: getNextLayerZ(prev) }]);
     setSelectedId(newItem.id);
   }
 
@@ -983,7 +1626,55 @@ export default function AlphabetMockupWordDesigner() {
       opacity: 1,
     };
 
-    setItems((prev) => [...prev, newItem]);
+    setItems((prev) => [...prev, { ...newItem, zIndex: getNextLayerZ(prev) }]);
+    setSelectedId(newItem.id);
+  }
+
+  async function handleWatermarkImageUpload(file) {
+    if (!file) return;
+    try {
+      const { img, src } = await readImageFile(file);
+      img._src = src;
+      setWatermarkImageAsset({
+        id: uid(),
+        name: file.name.replace(/\.[^/.]+$/, ""),
+        image: img,
+        src,
+      });
+    } catch (err) {
+      console.error(err);
+    }
+
+    if (watermarkImageUploadRef.current) watermarkImageUploadRef.current.value = "";
+  }
+
+  function addWatermarkImageToCanvas() {
+    if (!watermarkImageAsset) return;
+
+    const baseW = canvasW * 0.34;
+    const scale = baseW / watermarkImageAsset.image.width;
+    const width = watermarkImageAsset.image.width * scale;
+    const height = watermarkImageAsset.image.height * scale;
+
+    const newItem = {
+      id: uid(),
+      type: "watermark-image",
+      name: watermarkImageAsset.name || "Watermark Image",
+      image: watermarkImageAsset.image,
+      src: watermarkImageAsset.src,
+      x: (canvasW - width) / 2,
+      y: (canvasH - height) / 2,
+      width,
+      height,
+      baseWidth: width,
+      baseHeight: height,
+      widthScale: 100,
+      heightScale: 100,
+      rotation: 0,
+      opacity: Math.max(0.05, watermarkOpacity / 100),
+    };
+
+    setItems((prev) => [...prev, { ...newItem, zIndex: getNextLayerZ(prev) }]);
     setSelectedId(newItem.id);
   }
 
@@ -1003,7 +1694,7 @@ export default function AlphabetMockupWordDesigner() {
       fontSize: Math.round(canvasH * 0.045),
     };
 
-    setItems((prev) => [...prev, newItem]);
+    setItems((prev) => [...prev, { ...newItem, zIndex: getNextLayerZ(prev) }]);
     setSelectedId(newItem.id);
   }
   function drawBannerBlock(ctx, {
@@ -1125,19 +1816,7 @@ export default function AlphabetMockupWordDesigner() {
       targetH,
     });
 
-    if (watermarkEnabled && watermarkText) {
-      ctx.save();
-      ctx.globalAlpha = watermarkOpacity / 100;
-      ctx.fillStyle = watermarkColor;
-      ctx.font = `700 ${Math.round(targetH * 0.045)}px Arial, sans-serif`;
-      ctx.textAlign = "center";
-      ctx.translate(targetW * 0.5, targetH * 0.5);
-      ctx.rotate((-18 * Math.PI) / 180);
-      ctx.fillText(watermarkText, 0, 0);
-      ctx.restore();
-    }
-
-    drawItems.forEach((item) => {
+    getOrderedItems(drawItems).forEach((item) => {
       ctx.save();
       ctx.globalAlpha = item.opacity ?? 1;
       ctx.translate(item.x + item.width / 2, item.y + item.height / 2);
@@ -1149,6 +1828,14 @@ export default function AlphabetMockupWordDesigner() {
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
         ctx.fillText(item.text || "Watermark", 0, 0);
+      } else if (item.type === "watermark-image") {
+        ctx.drawImage(
+          item.image,
+          -item.width / 2,
+          -item.height / 2,
+          item.width,
+          item.height
+        );
       } else {
         ctx.drawImage(
           item.image,
@@ -1172,19 +1859,32 @@ export default function AlphabetMockupWordDesigner() {
 
       ctx.restore();
     });
+
+    if (watermarkEnabled && watermarkText) {
+      ctx.save();
+      ctx.globalAlpha = watermarkOpacity / 100;
+      ctx.fillStyle = watermarkColor;
+      ctx.font = `700 ${Math.round(targetH * 0.045)}px Arial, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.translate(targetW * 0.5, targetH * 0.5);
+      ctx.rotate((-18 * Math.PI) / 180);
+      ctx.fillText(watermarkText, 0, 0);
+      ctx.restore();
+    }
   }
 
   function getCanvasPoint(evt) {
-    const wrap = stageWrapRef.current;
-    if (!wrap) return { x: 0, y: 0 };
-    const rect = wrap.getBoundingClientRect();
+    const canvas = previewCanvasRef.current;
+    if (!canvas) return { x: 0, y: 0 };
+    const rect = canvas.getBoundingClientRect();
     return {
       x: (evt.clientX - rect.left) / zoom,
       y: (evt.clientY - rect.top) / zoom,
     };
   }
 
-  function pointInRotatedItem(px, py, item) {
+  function getRotatedLocalPoint(px, py, item) {
     const cx = item.x + item.width / 2;
     const cy = item.y + item.height / 2;
     const dx = px - cx;
@@ -1192,14 +1892,100 @@ export default function AlphabetMockupWordDesigner() {
     const angle = ((-(item.rotation || 0)) * Math.PI) / 180;
     const rx = dx * Math.cos(angle) - dy * Math.sin(angle);
     const ry = dx * Math.sin(angle) + dy * Math.cos(angle);
-    return Math.abs(rx) <= item.width / 2 && Math.abs(ry) <= item.height / 2;
+    return {
+      localX: rx + item.width / 2,
+      localY: ry + item.height / 2,
+    };
+  }
+
+  function pointInRotatedItem(px, py, item) {
+    const { localX, localY } = getRotatedLocalPoint(px, py, item);
+
+    if (item.type === "watermark") {
+      const padX = Math.max(18, item.width * 0.08);
+      const padY = Math.max(14, item.height * 0.25);
+      return (
+        localX >= -padX &&
+        localX <= item.width + padX &&
+        localY >= -padY &&
+        localY <= item.height + padY
+      );
+    }
+
+    return (
+      localX >= 0 &&
+      localX <= item.width &&
+      localY >= 0 &&
+      localY <= item.height
+    );
+  }
+
+  function getHitCanvasForImage(item) {
+    const src = item?.src || item?.image?._src || item?.image?.src || null;
+    const img = item?.image;
+    if (!src || !img) return null;
+
+    const cacheKey = `${src}__${img.width}x${img.height}`;
+    if (hitCanvasCacheRef.current.has(cacheKey)) {
+      return hitCanvasCacheRef.current.get(cacheKey);
+    }
+
+    const hitCanvas = document.createElement("canvas");
+    hitCanvas.width = img.width;
+    hitCanvas.height = img.height;
+    const hitCtx = hitCanvas.getContext("2d", { willReadFrequently: true });
+    if (!hitCtx) return null;
+
+    hitCtx.clearRect(0, 0, hitCanvas.width, hitCanvas.height);
+    hitCtx.drawImage(img, 0, 0, hitCanvas.width, hitCanvas.height);
+    hitCanvasCacheRef.current.set(cacheKey, hitCanvas);
+    return hitCanvas;
+  }
+
+  function pointHitsVisiblePixels(px, py, item) {
+    if (!pointInRotatedItem(px, py, item)) return false;
+
+    if (!item.image || item.type === "watermark") return true;
+
+    const { localX, localY } = getRotatedLocalPoint(px, py, item);
+
+    const hitCanvas = getHitCanvasForImage(item);
+    if (!hitCanvas) return true;
+
+    const hitCtx = hitCanvas.getContext("2d", { willReadFrequently: true });
+    if (!hitCtx) return true;
+
+    const sampleX = Math.min(
+      hitCanvas.width - 1,
+      Math.max(0, Math.floor((localX / item.width) * hitCanvas.width))
+    );
+    const sampleY = Math.min(
+      hitCanvas.height - 1,
+      Math.max(0, Math.floor((localY / item.height) * hitCanvas.height))
+    );
+
+    const alpha = hitCtx.getImageData(sampleX, sampleY, 1, 1).data[3];
+    return alpha >= 20;
   }
 
   function handleCanvasMouseDown(evt) {
     const p = getCanvasPoint(evt);
-    const found = [...items]
-      .reverse()
-      .find((item) => pointInRotatedItem(p.x, p.y, item));
+    const found = getOrderedItems(items)
+      .map((item) => ({
+        item,
+        zIndex: item?.zIndex ?? 0,
+        rank:
+          item.type === "watermark"
+            ? 3
+            : item.type === "watermark-image"
+            ? 2
+            : 1,
+      }))
+      .sort((a, b) => {
+        if (a.rank !== b.rank) return b.rank - a.rank;
+        return b.zIndex - a.zIndex;
+      })
+      .find(({ item }) => pointHitsVisiblePixels(p.x, p.y, item))?.item;
 
     if (found) {
       setSelectedId(found.id);
@@ -1258,25 +2044,98 @@ export default function AlphabetMockupWordDesigner() {
     });
   }
 
+  function applyUniformScale(value) {
+    if (!selectedItem) return;
+    const baseWidth = selectedItem.baseWidth || selectedItem.width;
+    const baseHeight = selectedItem.baseHeight || selectedItem.height;
+    updateSelectedItem({
+      width: baseWidth * (value / 100),
+      height: baseHeight * (value / 100),
+      widthScale: value,
+      heightScale: value,
+    });
+  }
+
+  async function trimSelectedImageLayer() {
+    if (!selectedItem) return;
+    if (!["element", "logo", "watermark-image"].includes(selectedItem.type)) return;
+    if (!selectedItem.image) return;
+
+    try {
+      const currentSrc = selectedItem.src || selectedItem.image?._src || selectedItem.image?.src;
+      const trimmed = await trimTransparentImage(selectedItem.image, currentSrc);
+      if (!trimmed.trimmed) {
+        window.alert("This layer does not have enough extra transparent space to trim.");
+        return;
+      }
+
+      const widthScale = selectedItem.widthScale || 100;
+      const heightScale = selectedItem.heightScale || 100;
+      const nextBaseWidth = trimmed.img.width;
+      const nextBaseHeight = trimmed.img.height;
+
+      setItems((prev) =>
+        prev.map((item) =>
+          item.id !== selectedItem.id
+            ? item
+            : {
+                ...item,
+                image: trimmed.img,
+                src: trimmed.src,
+                baseWidth: nextBaseWidth,
+                baseHeight: nextBaseHeight,
+                width: nextBaseWidth * (widthScale / 100),
+                height: nextBaseHeight * (heightScale / 100),
+              }
+        )
+      );
+
+      if (selectedItem.type === "logo") {
+        setLogoAsset((prev) =>
+          prev ? { ...prev, image: trimmed.img, src: trimmed.src } : prev
+        );
+      }
+      if (selectedItem.type === "watermark-image") {
+        setWatermarkImageAsset((prev) =>
+          prev ? { ...prev, image: trimmed.img, src: trimmed.src } : prev
+        );
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
   function bringForward() {
     if (!selectedId) return;
     setItems((prev) => {
-      const idx = prev.findIndex((i) => i.id === selectedId);
-      if (idx < 0 || idx === prev.length - 1) return prev;
-      const next = [...prev];
-      [next[idx], next[idx + 1]] = [next[idx + 1], next[idx]];
-      return next;
+      const ordered = getOrderedItems(prev);
+      const idx = ordered.findIndex((i) => i.id === selectedId);
+      if (idx < 0 || idx === ordered.length - 1) return prev;
+      const current = ordered[idx];
+      const above = ordered[idx + 1];
+      const swapped = prev.map((item) => {
+        if (item.id === current.id) return { ...item, zIndex: above.zIndex ?? (idx + 1) };
+        if (item.id === above.id) return { ...item, zIndex: current.zIndex ?? idx };
+        return item;
+      });
+      return normalizeLayerOrder(swapped);
     });
   }
 
   function sendBackward() {
     if (!selectedId) return;
     setItems((prev) => {
-      const idx = prev.findIndex((i) => i.id === selectedId);
+      const ordered = getOrderedItems(prev);
+      const idx = ordered.findIndex((i) => i.id === selectedId);
       if (idx <= 0) return prev;
-      const next = [...prev];
-      [next[idx], next[idx - 1]] = [next[idx - 1], next[idx]];
-      return next;
+      const current = ordered[idx];
+      const below = ordered[idx - 1];
+      const swapped = prev.map((item) => {
+        if (item.id === current.id) return { ...item, zIndex: below.zIndex ?? (idx - 1) };
+        if (item.id === below.id) return { ...item, zIndex: current.zIndex ?? idx };
+        return item;
+      });
+      return normalizeLayerOrder(swapped);
     });
   }
 
@@ -1393,6 +2252,17 @@ export default function AlphabetMockupWordDesigner() {
           >
             <div style={{ fontSize: 12, color: "#8a8fa3", marginBottom: 10 }}>
               Hidden Mac files like __MACOSX, .DS_Store, and ._ files are ignored automatically.
+            </div>
+            <label style={checkRow}>
+              <input
+                type="checkbox"
+                checked={autoTrimAlphaUploads}
+                onChange={(e) => setAutoTrimAlphaUploads(e.target.checked)}
+              />
+              <span>Auto-trim extra transparent space on alpha upload</span>
+            </label>
+            <div style={{ fontSize: 12, color: "#6d7690", marginBottom: 10 }}>
+              This helps letters size more accurately when they are placed on the canvas.
             </div>
 
             <div style={{ display: "grid", gap: 10 }}>
@@ -1609,6 +2479,31 @@ export default function AlphabetMockupWordDesigner() {
               </div>
             ) : (
               <>
+                <Label style={{ marginTop: 10 }}>Alignment</Label>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr 1fr",
+                    gap: 10,
+                    marginBottom: 12,
+                  }}
+                >
+                  <button
+                    onClick={() => setTextAlign("left")}
+                    style={textAlign === "left" ? selectedTile : tileBtn}
+                  >
+                    <div style={{ fontWeight: 700 }}>Left</div>
+                    <div style={tileSub}>Align design to left</div>
+                  </button>
+                  <button
+                    onClick={() => setTextAlign("center")}
+                    style={textAlign === "center" ? selectedTile : tileBtn}
+                  >
+                    <div style={{ fontWeight: 700 }}>Center</div>
+                    <div style={tileSub}>Center the full design</div>
+                  </button>
+                </div>
+
                 <SliderRow
                   label="Top start position"
                   min={0}
@@ -1781,8 +2676,16 @@ export default function AlphabetMockupWordDesigner() {
 
                 {(selectedItem.type === "letter" ||
                   selectedItem.type === "element" ||
-                  selectedItem.type === "logo") ? (
+                  selectedItem.type === "logo" ||
+                  selectedItem.type === "watermark-image") ? (
                   <>
+                    <SliderRow
+                      label="Uniform size %"
+                      min={20}
+                      max={260}
+                      value={Math.round(((selectedItem.widthScale || 100) + (selectedItem.heightScale || 100)) / 2)}
+                      setValue={applyUniformScale}
+                    />
                     <SliderRow
                       label="Width %"
                       min={20}
@@ -1846,6 +2749,11 @@ export default function AlphabetMockupWordDesigner() {
                 />
 
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+                  {(["element", "logo", "watermark-image"].includes(selectedItem.type)) ? (
+                    <button onClick={trimSelectedImageLayer} style={secondaryBtn}>
+                      Trim Transparent Space
+                    </button>
+                  ) : null}
                   <button onClick={bringForward} style={secondaryBtn}>
                     Bring Forward
                   </button>
@@ -1959,6 +2867,14 @@ export default function AlphabetMockupWordDesigner() {
             <div style={{ fontSize: 13, color: "#6d7690", marginBottom: 8 }}>
               Upload decorative PNG elements, then click Add to place them on the mockup.
             </div>
+            <label style={checkRow}>
+              <input
+                type="checkbox"
+                checked={autoTrimElementUploads}
+                onChange={(e) => setAutoTrimElementUploads(e.target.checked)}
+              />
+              <span>Auto-trim extra transparent space on element upload</span>
+            </label>
 
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button
@@ -2355,6 +3271,65 @@ export default function AlphabetMockupWordDesigner() {
             <button onClick={addWatermarkToCanvas} style={{ ...smallGhostBtn, marginTop: 8 }}>
               Add Movable Watermark Text Layer
             </button>
+
+            <div style={{ fontSize: 13, fontWeight: 800, marginTop: 16, marginBottom: 6 }}>
+              Watermark image
+            </div>
+
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button
+                onClick={() => watermarkImageUploadRef.current?.click()}
+                style={secondaryBtn}
+              >
+                Upload Watermark Image
+              </button>
+              <button
+                onClick={addWatermarkImageToCanvas}
+                disabled={!watermarkImageAsset}
+                style={!watermarkImageAsset ? disabledBtn : smallGhostBtn}
+              >
+                Add Watermark Image to Canvas
+              </button>
+            </div>
+
+            <input
+              ref={watermarkImageUploadRef}
+              type="file"
+              accept=".png,image/png,image/webp,image/jpeg"
+              style={{ display: "none" }}
+              onChange={(e) => handleWatermarkImageUpload(e.target.files?.[0])}
+            />
+
+            {watermarkImageAsset ? (
+              <div
+                style={{
+                  marginTop: 12,
+                  display: "grid",
+                  gridTemplateColumns: "56px 1fr",
+                  gap: 10,
+                  alignItems: "center",
+                  padding: 10,
+                  border: "1px solid #ece4df",
+                  borderRadius: 14,
+                  background: "#fff",
+                }}
+              >
+                <img
+                  src={watermarkImageAsset.src}
+                  alt={watermarkImageAsset.name}
+                  style={{
+                    width: 56,
+                    height: 56,
+                    objectFit: "contain",
+                    borderRadius: 10,
+                    background: "#faf8f7",
+                  }}
+                />
+                <div style={{ fontSize: 13, color: "#6d7690" }}>
+                  {watermarkImageAsset.name}
+                </div>
+              </div>
+            ) : null}
           </CollapseSection>
 
 
@@ -2437,8 +3412,24 @@ export default function AlphabetMockupWordDesigner() {
               Reset Zoom
             </button>
           </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+            <button
+              onClick={undoAction}
+              disabled={!undoStack.length}
+              style={!undoStack.length ? disabledBtn : smallGhostBtn}
+            >
+              Undo
+            </button>
+            <button
+              onClick={redoAction}
+              disabled={!redoStack.length}
+              style={!redoStack.length ? disabledBtn : smallGhostBtn}
+            >
+              Redo
+            </button>
+          </div>
           <div style={{ fontSize: 13, color: "#6d7690" }}>
-            Version 6.7 • Design Size + 3 Banners
+            Version 7.3.1 • Pixel Hit Selection + Click Offset Fix
           </div>
         </div>
 
