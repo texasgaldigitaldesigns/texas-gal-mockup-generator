@@ -842,7 +842,6 @@ export default function AlphabetMockupWordDesigner() {
   const [exportName, setExportName] = useState("");
   const [exportDpi] = useState(300);
 
-
   const [openSections, setOpenSections] = useState({
     canvas: true,
     upload: true,
@@ -1366,7 +1365,6 @@ export default function AlphabetMockupWordDesigner() {
     textAlign,
   ]);
 
-
   useEffect(() => {
     drawToCanvas(previewCanvasRef.current, canvasW, canvasH, items, selectedId);
   }, [
@@ -1578,8 +1576,37 @@ export default function AlphabetMockupWordDesigner() {
     setSelectedId(newItem.id);
   }
 
+  function removeCanvasItemsByType(type) {
+    setItems((prev) => {
+      const next = prev.filter((item) => item.type !== type);
+      return normalizeLayerOrder(next);
+    });
+    setSelectedId((prev) => {
+      const selected = items.find((item) => item.id === prev);
+      return selected?.type === type ? null : prev;
+    });
+  }
+
+  function removeCanvasItemsBySource(type, src) {
+    if (!src) return;
+    setItems((prev) => {
+      const next = prev.filter(
+        (item) => !(item.type === type && item.src === src)
+      );
+      return normalizeLayerOrder(next);
+    });
+    setSelectedId((prev) => {
+      const selected = items.find((item) => item.id === prev);
+      return selected?.type === type && selected?.src === src ? null : prev;
+    });
+  }
+
   function removeLibraryElement(assetId) {
+    const asset = elementsLibrary.find((el) => el.id === assetId);
     setElementsLibrary((prev) => prev.filter((el) => el.id !== assetId));
+    if (asset?.src) {
+      removeCanvasItemsBySource("element", asset.src);
+    }
   }
 
   async function handleLogoUpload(file) {
@@ -1678,6 +1705,17 @@ export default function AlphabetMockupWordDesigner() {
     setSelectedId(newItem.id);
   }
 
+  function removeWatermarkImageAsset() {
+    const src = watermarkImageAsset?.src;
+    setWatermarkImageAsset(null);
+    if (watermarkImageUploadRef.current) {
+      watermarkImageUploadRef.current.value = "";
+    }
+    if (src) {
+      removeCanvasItemsBySource("watermark-image", src);
+    }
+  }
+
   function addWatermarkToCanvas() {
     const newItem = {
       id: uid(),
@@ -1697,6 +1735,11 @@ export default function AlphabetMockupWordDesigner() {
     setItems((prev) => [...prev, { ...newItem, zIndex: getNextLayerZ(prev) }]);
     setSelectedId(newItem.id);
   }
+
+  function removeWatermarkTextLayers() {
+    removeCanvasItemsByType("watermark");
+  }
+
   function drawBannerBlock(ctx, {
     enabled,
     position,
@@ -1739,7 +1782,7 @@ export default function AlphabetMockupWordDesigner() {
     ctx.restore();
   }
 
-    function drawToCanvas(canvas, targetW, targetH, drawItems, selectedDrawId) {
+  function drawToCanvas(canvas, targetW, targetH, drawItems, selectedDrawId) {
     if (!canvas) return;
     canvas.width = targetW;
     canvas.height = targetH;
@@ -2647,7 +2690,6 @@ export default function AlphabetMockupWordDesigner() {
             ) : null}
           </CollapseSection>
 
-
           <CollapseSection
             title="6. Selected Layer"
             open={openSections.selected}
@@ -2772,7 +2814,7 @@ export default function AlphabetMockupWordDesigner() {
             )}
           </CollapseSection>
 
-                    <CollapseSection
+          <CollapseSection
             title="7. Background"
             open={openSections.background}
             onToggle={() => toggleSection("background")}
@@ -2858,7 +2900,6 @@ export default function AlphabetMockupWordDesigner() {
             />
           </CollapseSection>
 
-
           <CollapseSection
             title="8. Elements"
             open={openSections.elements}
@@ -2926,7 +2967,7 @@ export default function AlphabetMockupWordDesigner() {
                         Add
                       </button>
                       <button onClick={() => removeLibraryElement(asset.id)} style={smallGhostBtn}>
-                        X
+                        Delete
                       </button>
                     </div>
                   </div>
@@ -3268,9 +3309,14 @@ export default function AlphabetMockupWordDesigner() {
               </div>
             </div>
 
-            <button onClick={addWatermarkToCanvas} style={{ ...smallGhostBtn, marginTop: 8 }}>
-              Add Movable Watermark Text Layer
-            </button>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
+              <button onClick={addWatermarkToCanvas} style={smallGhostBtn}>
+                Add Movable Watermark Text Layer
+              </button>
+              <button onClick={removeWatermarkTextLayers} style={smallGhostBtn}>
+                Delete Watermark Text Layer
+              </button>
+            </div>
 
             <div style={{ fontSize: 13, fontWeight: 800, marginTop: 16, marginBottom: 6 }}>
               Watermark image
@@ -3289,6 +3335,13 @@ export default function AlphabetMockupWordDesigner() {
                 style={!watermarkImageAsset ? disabledBtn : smallGhostBtn}
               >
                 Add Watermark Image to Canvas
+              </button>
+              <button
+                onClick={removeWatermarkImageAsset}
+                disabled={!watermarkImageAsset}
+                style={!watermarkImageAsset ? disabledBtn : smallGhostBtn}
+              >
+                Delete Watermark Image
               </button>
             </div>
 
@@ -3331,7 +3384,6 @@ export default function AlphabetMockupWordDesigner() {
               </div>
             ) : null}
           </CollapseSection>
-
 
           <CollapseSection
             title="12. Export"
