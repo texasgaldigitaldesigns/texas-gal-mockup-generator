@@ -3,7 +3,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-// Texas Gal Mockup Generator — V6.9
+// Texas Gal Mockup Generator — V7.7
 // Layout + overlap upgrade:
 // - Templates removed
 // - Keeps auto-fit text to canvas
@@ -18,6 +18,11 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 // - Adds overlap layout controls
 // - Allows tighter negative letter spacing
 // - Export file name starts blank and warns if empty
+// - Supports flexible alpha filenames like A.png, A1.png, A2.png, b1.png
+// - Supports multiple alternates per letter in each alpha set
+// - Full Alphabet Preview shows every uploaded character, including lowercase and alternates
+// - Typed lowercase letters now prefer lowercase artwork instead of uppercase fallback
+// - Smart fallback: if lowercase files were named A1/A2 instead of a1/a2, typed lowercase uses the second variant
 
 const MAX_SETS = 8;
 
@@ -169,21 +174,132 @@ function fitRectContain(imgW, imgH, boxW, boxH) {
 }
 
 function parseLetterKey(filename) {
-  const name = filename.replace(/\.[^/.]+$/, "");
-  const exact = LETTER_KEYS.find((k) => k === name);
-  if (exact) return exact;
+  const name = filename.replace(/\.[^/.]+$/, "").trim();
+  if (!name) return null;
 
-  const upperMatch = name.match(/^([A-Z])(?:_|-|\s|$)/);
-  if (upperMatch) return upperMatch[1];
+  // Original simple naming still works: A.png, B.png, a.png, 1.png
+  if (LETTER_KEYS.includes(name)) return name;
 
-  const lowerMatch = name.match(/^([a-z])(?:_|-|\s|$)/);
-  if (lowerMatch) return lowerMatch[1];
+  // Best new naming style: A1.png, A2.png, b1.png, b2.png
+  // Also supports lower-case hint names like A_lower.png, A-lower.png, A_lc.png.
+  const lowerHint = /(^|[\s_\-])(lower|lowercase|lc|small)([\s_\-]|$)/i.test(name);
+  const startsWithLetterOrNumber = name.match(/^[A-Za-z0-9]/)?.[0] || null;
+  if (startsWithLetterOrNumber && LETTER_KEYS.includes(startsWithLetterOrNumber)) {
+    return lowerHint && /[A-Z]/.test(startsWithLetterOrNumber)
+      ? startsWithLetterOrNumber.toLowerCase()
+      : startsWithLetterOrNumber;
+  }
 
-  const digitMatch = name.match(/^([0-9])(?:_|-|\s|$)/);
-  if (digitMatch) return digitMatch[1];
+  // Also support names where the letter is separated, like floral_A.png or set-3-b.png
+  const parts = name.split(/[\s_\-]+/).filter(Boolean);
+  const singleCharacterPart = parts.find((part) => LETTER_KEYS.includes(part));
+  if (singleCharacterPart) return singleCharacterPart;
 
-  if (name.length === 1 && LETTER_KEYS.includes(name)) return name;
   return null;
+}
+
+function getSortRankForLetterKey(key) {
+  const upperIndex = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".indexOf(key);
+  if (upperIndex >= 0) return upperIndex;
+
+  const lowerIndex = "abcdefghijklmnopqrstuvwxyz".indexOf(key);
+  if (lowerIndex >= 0) return 100 + lowerIndex;
+
+  const digitIndex = "0123456789".indexOf(key);
+  if (digitIndex >= 0) return 200 + digitIndex;
+
+  return 999;
+}
+
+function getLetterVariants(alphaSet, char) {
+  if (!alphaSet?.letters || !char) return [];
+
+  const direct = alphaSet.letters[char];
+  if (direct) return Array.isArray(direct) ? direct : [direct];
+
+  const exactMatches = [];
+  Object.values(alphaSet.letters || {}).forEach((value) => {
+    const list = Array.isArray(value) ? value : value ? [value] : [];
+    list.forEach((img) => {
+      if (img?._letterKey === char) exactMatches.push(img);
+    });
+  });
+  if (exactMatches.length) return exactMatches;
+
+  const oppositeCase = char === char.toLowerCase() ? char.toUpperCase() : char.toLowerCase();
+  const fallback = alphaSet.letters[oppositeCase];
+  if (fallback) return Array.isArray(fallback) ? fallback : [fallback];
+
+  return [];
+}
+
+function getCaseAwareVariant(alphaSet, char, variantSeed = 0) {
+  if (!alphaSet?.letters || !char) return null;
+
+  const direct = alphaSet.letters[char];
+  if (direct) {
+    const variants = Array.isArray(direct) ? direct : [direct];
+    if (!variants.length) return null;
+
+    // If the customer uploaded exact lowercase names like a.png/a1.png,
+    // use those exact lowercase images. If there are multiple alternates,
+    // still rotate through them.
+    const index = Math.abs(Math.floor(variantSeed)) % variants.length;
+    return variants[index];
+  }
+
+  // If exact lowercase was not found, support the common customer pattern:
+  // A1.png, A2.png, B1.png, B2.png where the second image is the lowercase style.
+  // This lets typing "a" use the second A variant instead of the uppercase A.
+  if (char >= "a" && char <= "z") {
+    const upper = char.toUpperCase();
+    const upperVariantsRaw = alphaSet.letters[upper];
+    const upperVariants = Array.isArray(upperVariantsRaw)
+      ? upperVariantsRaw
+      : upperVariantsRaw
+      ? [upperVariantsRaw]
+      : [];
+
+    if (upperVariants.length > 1) {
+      const filenameHint = upperVariants.find((img) =>
+        /(^|[\s_\-])(lower|lowercase|lc|small)([\s_\-]|$)/i.test(img?._filename || "")
+      );
+      if (filenameHint) return filenameHint;
+
+      // Use the second variant as lowercase when files are named A1/A2.
+      return upperVariants[1];
+    }
+
+    if (upperVariants.length === 1) return upperVariants[0];
+  }
+
+  // If uppercase is typed but only lowercase art exists, fall back to it.
+  if (char >= "A" && char <= "Z") {
+    const lower = char.toLowerCase();
+    const lowerVariantsRaw = alphaSet.letters[lower];
+    const lowerVariants = Array.isArray(lowerVariantsRaw)
+      ? lowerVariantsRaw
+      : lowerVariantsRaw
+      ? [lowerVariantsRaw]
+      : [];
+    if (lowerVariants.length) return lowerVariants[0];
+  }
+
+  const variants = getLetterVariants(alphaSet, char);
+  if (!variants.length) return null;
+  const index = Math.abs(Math.floor(variantSeed)) % variants.length;
+  return variants[index];
+}
+
+function pickLetterImage(alphaSet, char, variantSeed = 0) {
+  return getCaseAwareVariant(alphaSet, char, variantSeed);
+}
+
+function countLetterImages(letters) {
+  return Object.values(letters || {}).reduce((sum, value) => {
+    if (Array.isArray(value)) return sum + value.length;
+    return sum + (value ? 1 : 0);
+  }, 0);
 }
 
 function isHiddenMacPath(path) {
@@ -328,10 +444,11 @@ function buildWordItems({
         : Math.min(charIndex, loadedSets.length - 1);
 
       const alphaSet = loadedSets[setIndex];
-      const img =
-        alphaSet?.letters?.[char] ||
-        alphaSet?.letters?.[char.toUpperCase()] ||
-        alphaSet?.letters?.[char.toLowerCase()];
+      const img = pickLetterImage(
+        alphaSet,
+        char,
+        globalIndex + lineVisibleIndex + lineIndex * 31
+      );
       if (!img) return;
 
       const baseScale = baseLetterH / img.height;
@@ -544,26 +661,55 @@ function buildAlphabetItems({
   );
   if (!loadedSets.length) return [];
 
-  const letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
-  const cols = 6;
-  const rows = Math.ceil(letters.length / cols);
+  // Show EVERY uploaded alpha image in full alphabet preview:
+  // uppercase, lowercase, numbers, and alternates like A1/A2/B1/B2.
+  const previewEntries = [];
+
+  loadedSets.forEach((alphaSet, setIndex) => {
+    const sortedKeys = Object.keys(alphaSet.letters || {}).sort((a, b) => {
+      const rankDiff = getSortRankForLetterKey(a) - getSortRankForLetterKey(b);
+      if (rankDiff !== 0) return rankDiff;
+      return String(a).localeCompare(String(b));
+    });
+
+    sortedKeys.forEach((key) => {
+      const variants = Array.isArray(alphaSet.letters[key])
+        ? alphaSet.letters[key]
+        : alphaSet.letters[key]
+        ? [alphaSet.letters[key]]
+        : [];
+
+      variants.forEach((img, variantIndex) => {
+        previewEntries.push({
+          alphaSet,
+          setIndex,
+          key,
+          img,
+          variantIndex,
+        });
+      });
+    });
+  });
+
+  if (!previewEntries.length) return [];
+
+  const cols = previewEntries.length <= 26 ? 6 : previewEntries.length <= 52 ? 8 : 10;
+  const rows = Math.ceil(previewEntries.length / cols);
   const cellW = canvasW / cols;
-  const topPad = canvasH * 0.12;
-  const usableH = canvasH * 0.76;
+  const topPad = canvasH * 0.11;
+  const usableH = canvasH * 0.80;
   const rowH = usableH / rows;
   const scaleBoost = alphabetScale / 100;
   const targetH = Math.min(
-    rowH * 0.95 * scaleBoost,
-    canvasH * 0.22 * scaleBoost
+    rowH * 0.82 * scaleBoost,
+    cellW * 0.72 * scaleBoost,
+    canvasH * 0.18 * scaleBoost
   );
 
   const items = [];
 
-  letters.forEach((char, index) => {
-    const setIndex = autoAlternate ? index % loadedSets.length : 0;
-    const alphaSet = loadedSets[setIndex];
-    const img =
-      alphaSet?.letters?.[char] || alphaSet?.letters?.[char.toLowerCase()];
+  previewEntries.forEach((entry, index) => {
+    const { alphaSet, key, img, variantIndex } = entry;
     if (!img) return;
 
     const scale = targetH / img.height;
@@ -577,7 +723,7 @@ function buildAlphabetItems({
     items.push({
       id: uid(),
       type: "letter",
-      char,
+      char: key,
       setId: alphaSet.id,
       setName: alphaSet.name,
       image: img,
@@ -593,6 +739,7 @@ function buildAlphabetItems({
       rotation: 0,
       opacity: 1,
       baseLetterH: targetH,
+      variantIndex,
     });
   });
 
@@ -898,7 +1045,7 @@ export default function AlphabetMockupWordDesigner() {
       selectedId,
       transparentBg,
       bgColor,
-      bgImage,
+bgImage,
       bgFit,
       bgOpacity,
       bannerEnabled,
@@ -1424,9 +1571,14 @@ export default function AlphabetMockupWordDesigner() {
   async function loadAlphaSet(slotIndex, fileList, sourceLabel) {
     const rawFiles = Array.from(fileList || []);
     const pngFiles = rawFiles.filter((f) => /\.png$/i.test(f.name));
-    const usableFiles = pngFiles.filter(
-      (f) => !isHiddenMacPath(f.webkitRelativePath || f.name)
-    );
+    const usableFiles = pngFiles
+      .filter((f) => !isHiddenMacPath(f.webkitRelativePath || f.name))
+      .sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        })
+      );
 
     const letters = {};
     const skipped = [];
@@ -1447,13 +1599,19 @@ export default function AlphabetMockupWordDesigner() {
           if (trimmed.trimmed) trimmedCount += 1;
         }
         img._src = src;
-        letters[key] = img;
+        img._letterKey = key;
+        img._filename = file.name;
+        if (!letters[key]) {
+          letters[key] = [];
+        }
+        letters[key].push(img);
       } catch (err) {
         console.error("Could not load image", file.name, err);
       }
     }
 
-    const foundCount = Object.keys(letters).length;
+    const foundCount = countLetterImages(letters);
+    const letterGroupCount = Object.keys(letters).length;
     const hasUppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
       .split("")
       .filter((k) => letters[k]).length;
@@ -1465,8 +1623,9 @@ export default function AlphabetMockupWordDesigner() {
 
     let status = "No valid letter PNGs found.";
     if (foundCount > 0) {
-      status = `${foundCount} valid letters found`;
-      if (hasUppercase > 0) status += ` • Uppercase found: ${hasUppercase}`;
+      status = `${foundCount} valid PNGs found`;
+      status += ` • Letter groups: ${letterGroupCount}`;
+      if (hasUppercase > 0) status += ` • Uppercase groups found: ${hasUppercase}`;
       if (trimmedCount > 0) status += ` • Trimmed: ${trimmedCount}`;
       if (skipped.length > 0) status += ` • Skipped: ${skipped.length}`;
       status += ` • Loaded from ${sourceLabel}`;
@@ -1798,7 +1957,7 @@ export default function AlphabetMockupWordDesigner() {
       ctx.fillStyle = bgColor;
       ctx.fillRect(0, 0, targetW, targetH);
 
-      if (bgImage) {
+  if (bgImage) {
         const rect =
           bgFit === "contain"
             ? fitRectContain(bgImage.width, bgImage.height, targetW, targetH)
@@ -2335,7 +2494,7 @@ export default function AlphabetMockupWordDesigner() {
                         </div>
                         <div style={{ fontSize: 12, color: "#7b8091" }}>
                           {set
-                            ? `${set.name} • ${set.count} valid letters`
+                            ? `${set.name} • ${set.count} valid PNGs`
                             : "Choose PNG files or choose a folder"}
                         </div>
                       </div>
@@ -3481,7 +3640,7 @@ export default function AlphabetMockupWordDesigner() {
             </button>
           </div>
           <div style={{ fontSize: 13, color: "#6d7690" }}>
-            Version 7.3.1 • Pixel Hit Selection + Click Offset Fix
+            Version 7.5 • Flexible A1/A2 + Lowercase Preview
           </div>
         </div>
 
