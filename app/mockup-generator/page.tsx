@@ -3,7 +3,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 
-// Texas Gal Mockup Generator — V7.7
+// Texas Gal Mockup Generator — V7.7 (memory-efficiency fix, Oct 2026)
 // Layout + overlap upgrade:
 // - Templates removed
 // - Keeps auto-fit text to canvas
@@ -53,17 +53,22 @@ function rangeFromSeed(seed, min, max) {
   return min + seededUnit(seed) * (max - min);
 }
 
-function readImageFile(file) {
+// Blob URLs avoid embedding a full copy of each high-resolution PNG in a long base64 string.
+// Keep each URL alive for undo/redo, and revoke it only when the designer unmounts.
+function readImageFile(file, rememberUrl) {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => resolve({ img, src: reader.result });
-      img.onerror = reject;
-      img.src = reader.result;
+    const src = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      rememberUrl?.(src);
+      img._src = src;
+      resolve({ img, src });
     };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+    img.onerror = () => {
+      URL.revokeObjectURL(src);
+      reject(new Error(`Could not decode image: ${file.name}`));
+    };
+    img.src = src;
   });
 }
 
@@ -111,6 +116,8 @@ async function trimTransparentImage(img, src, options = {}) {
   }
 
   if (maxX < minX || maxY < minY) {
+    canvas.width = 0;
+    canvas.height = 0;
     return { img, src, trimmed: false, trimBounds: null };
   }
 
@@ -130,6 +137,8 @@ async function trimTransparentImage(img, src, options = {}) {
     bottomPad >= minTrimPixels;
 
   if (!shouldTrim) {
+    canvas.width = 0;
+    canvas.height = 0;
     return {
       img,
       src,
@@ -142,11 +151,31 @@ async function trimTransparentImage(img, src, options = {}) {
   croppedCanvas.width = cropW;
   croppedCanvas.height = cropH;
   const croppedCtx = croppedCanvas.getContext("2d");
-  if (!croppedCtx) return { img, src, trimmed: false, trimBounds: null };
+  if (!croppedCtx) {
+    canvas.width = 0;
+    canvas.height = 0;
+    return { img, src, trimmed: false, trimBounds: null };
+  }
 
   croppedCtx.drawImage(canvas, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-  const trimmedSrc = croppedCanvas.toDataURL("image/png");
-  const trimmedImg = await buildImageFromSource(trimmedSrc);
+  // toBlob is asynchronous and avoids an additional huge PNG data URL.
+  const trimmedBlob = await new Promise((resolve) => croppedCanvas.toBlob(resolve, "image/png"));
+  // Return the temporary canvas memory as soon as the lossless PNG is created.
+  canvas.width = 0;
+  canvas.height = 0;
+  croppedCanvas.width = 0;
+  croppedCanvas.height = 0;
+  if (!trimmedBlob) throw new Error("Could not create trimmed PNG.");
+
+  const trimmedSrc = URL.createObjectURL(trimmedBlob);
+  let trimmedImg;
+  try {
+    trimmedImg = await buildImageFromSource(trimmedSrc);
+  } catch (error) {
+    URL.revokeObjectURL(trimmedSrc);
+    throw error;
+  }
+  options.rememberUrl?.(trimmedSrc);
 
   return {
     img: trimmedImg,
@@ -878,6 +907,21 @@ export default function AlphabetMockupWordDesigner() {
   const logoUploadRef = useRef(null);
   const watermarkImageUploadRef = useRef(null);
   const hitCanvasCacheRef = useRef(new Map());
+  const imageObjectUrlsRef = useRef(new Set());
+
+  function rememberImageUrl(url) {
+    imageObjectUrlsRef.current.add(url);
+  }
+
+  useEffect(() => {
+    const urls = imageObjectUrlsRef.current;
+    const hitCache = hitCanvasCacheRef.current;
+    return () => {
+      urls.forEach((url) => URL.revokeObjectURL(url));
+      urls.clear();
+      hitCache.clear();
+    };
+  }, []);
 
   const [canvasPresetId, setCanvasPresetId] = useState("etsy");
   const canvasPreset = useMemo(
@@ -1591,9 +1635,9 @@ bgImage,
         continue;
       }
       try {
-        let { img, src } = await readImageFile(file);
+        let { img, src } = await readImageFile(file, rememberImageUrl);
         if (autoTrimAlphaUploads) {
-          const trimmed = await trimTransparentImage(img, src);
+          const trimmed = await trimTransparentImage(img, src, { rememberUrl: rememberImageUrl });
           img = trimmed.img;
           src = trimmed.src;
           if (trimmed.trimmed) trimmedCount += 1;
@@ -1661,7 +1705,7 @@ bgImage,
   async function handleBgImage(file) {
     if (!file) return;
     try {
-      const { img, src } = await readImageFile(file);
+      const { img, src } = await readImageFile(file, rememberImageUrl);
       img._src = src;
       setBgImage(img);
       setTransparentBg(false);
@@ -1682,10 +1726,10 @@ bgImage,
     const loaded = [];
     for (const file of files) {
       try {
-        let { img, src } = await readImageFile(file);
+        let { img, src } = await readImageFile(file, rememberImageUrl);
         let wasTrimmed = false;
         if (autoTrimElementUploads) {
-          const trimmed = await trimTransparentImage(img, src);
+          const trimmed = await trimTransparentImage(img, src, { rememberUrl: rememberImageUrl });
           img = trimmed.img;
           src = trimmed.src;
           wasTrimmed = !!trimmed.trimmed;
@@ -1771,7 +1815,7 @@ bgImage,
   async function handleLogoUpload(file) {
     if (!file) return;
     try {
-      const { img, src } = await readImageFile(file);
+      const { img, src } = await readImageFile(file, rememberImageUrl);
       img._src = src;
       setLogoAsset({
         id: uid(),
@@ -1819,7 +1863,7 @@ bgImage,
   async function handleWatermarkImageUpload(file) {
     if (!file) return;
     try {
-      const { img, src } = await readImageFile(file);
+      const { img, src } = await readImageFile(file, rememberImageUrl);
       img._src = src;
       setWatermarkImageAsset({
         id: uid(),
@@ -2123,24 +2167,34 @@ bgImage,
   }
 
   function getHitCanvasForImage(item) {
-    const src = item?.src || item?.image?._src || item?.image?.src || null;
     const img = item?.image;
-    if (!src || !img) return null;
+    if (!img || !img.width || !img.height) return null;
 
-    const cacheKey = `${src}__${img.width}x${img.height}`;
-    if (hitCanvasCacheRef.current.has(cacheKey)) {
-      return hitCanvasCacheRef.current.get(cacheKey);
+    // Cache by image identity, not by a potentially enormous base64 source string.
+    const cache = hitCanvasCacheRef.current;
+    if (cache.has(img)) {
+      const cached = cache.get(img);
+      cache.delete(img);
+      cache.set(img, cached);
+      return cached;
     }
 
+    // Hit testing needs only a small alpha map; export still uses the ORIGINAL image.
+    const maxSide = 768;
+    const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
     const hitCanvas = document.createElement("canvas");
-    hitCanvas.width = img.width;
-    hitCanvas.height = img.height;
+    hitCanvas.width = Math.max(1, Math.round(img.width * scale));
+    hitCanvas.height = Math.max(1, Math.round(img.height * scale));
     const hitCtx = hitCanvas.getContext("2d", { willReadFrequently: true });
     if (!hitCtx) return null;
 
-    hitCtx.clearRect(0, 0, hitCanvas.width, hitCanvas.height);
     hitCtx.drawImage(img, 0, 0, hitCanvas.width, hitCanvas.height);
-    hitCanvasCacheRef.current.set(cacheKey, hitCanvas);
+    cache.set(img, hitCanvas);
+    // Prevent a long editing session from retaining a full cache for every letter.
+    while (cache.size > 16) {
+      const oldestImage = cache.keys().next().value;
+      cache.delete(oldestImage);
+    }
     return hitCanvas;
   }
 
@@ -2265,7 +2319,7 @@ bgImage,
 
     try {
       const currentSrc = selectedItem.src || selectedItem.image?._src || selectedItem.image?.src;
-      const trimmed = await trimTransparentImage(selectedItem.image, currentSrc);
+      const trimmed = await trimTransparentImage(selectedItem.image, currentSrc, { rememberUrl: rememberImageUrl });
       if (!trimmed.trimmed) {
         window.alert("This layer does not have enough extra transparent space to trim.");
         return;
